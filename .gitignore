@@ -1,0 +1,15 @@
+# 上游代码：本仓库**不包含**它，使用者需自行克隆到 repo/（见 README）
+# 它是独立仓库，不应被本仓库跟踪。
+repo/
+
+# 本地 Python 环境（体积大且可重建）
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# PRM 探针产生的游戏文件（可重建）
+exp/probe-prm-label/.venv/
+exp/probe-prm-label/tw_games/
+
+.DS_Store

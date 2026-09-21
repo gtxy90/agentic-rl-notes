@@ -1,0 +1,19 @@
+# 本地 CPU 测试环境（macOS arm64）——只装纯算法依赖，不装 vllm / flash-attn。
+#
+# 用途：跑 tests/ 下的 core_gigpo 单测，验证信用分配数学。
+# 安装：  .venv/bin/pip install -r tests/requirements-local.txt
+#
+# 版本对齐 repo/setup.py 的 install_requires 与 VLLM_REQUIRES 约束，
+# 而不是 repo/requirements.txt —— 后者的 tensordict 约束与 setup.py 交集为空
+# （requirements.txt:17 写 <=0.6.2，setup.py:40 写 >=0.8.0,<=0.10.0），两套装不到一起。
+# pip install -e . 实际生效的是 setup.py，故以它为准。
+
+torch>=2.4                      # macOS arm64 的 CPU wheel
+numpy
+pandas
+ray[default]>=2.41.0,<=2.50.0   # verl/protocol.py 顶层 import ray
+tensordict>=0.8.0,<=0.10.0,!=0.9.0
+packaging
+transformers<=4.57.3            # verl/utils/torch_functional.py 需要
+
+pytest

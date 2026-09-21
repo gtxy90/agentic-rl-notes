@@ -1,0 +1,63 @@
+agentic-rl-notes
+Copyright 2026 gtxy90
+
+================================================================================
+第三方归属 / Third-Party Attribution
+================================================================================
+
+本仓库分析的对象是 verl-agent，其版权声明如下（转引自其 NOTICE 文件）：
+
+    This project includes code from the verl project.
+
+    Copyright 2023-2024 Bytedance Ltd. and/or its affiliates
+
+    Additional modifications and contributions:
+
+    Copyright 2025 Nanyang Technological University (NTU), Singapore
+    and the verl-agent (GiGPO) team.
+
+    来源：https://github.com/langfengQ/verl-agent
+    许可：Apache License 2.0
+
+--------------------------------------------------------------------------------
+本仓库包含的内容与不包含的内容
+--------------------------------------------------------------------------------
+
+**不包含**：verl-agent 的源代码。本仓库不重新分发上游任何代码文件。
+
+**包含**：对上游代码的分析笔记、以及基于公开接口编写的实验与部署脚本。
+
+--------------------------------------------------------------------------------
+衍生作品声明（Apache License 2.0, Section 4(b)）
+--------------------------------------------------------------------------------
+
+以下文件是对上游文件的修改版本，特此声明已作修改：
+
+  deploy/run_single_gpu.sh
+      基于上游 examples/gigpo_trainer/run_alfworld.sh 修改。
+      修改内容：将 2 卡配置改为单卡（24G）适配 —— tensor_model_parallel_size 2→1、
+      free_cache_engine 改为 True、gpu_memory_utilization 0.6→0.35、
+      三处 micro_batch 32→8、开启 param/optimizer/activation offload、
+      日志后端去掉 wandb、数据路径改为可配置。新增 --smoke 冒烟档位。
+      该文件 58 行配置中有 40 行与上游相同，其余为上述改动。
+
+以下文件包含对上游代码的**引用片段**，用途为分析评论（fair use / 引用）：
+
+  exp/notes/01-credit-assignment.md
+  exp/notes/02-async-rl.md
+  exp/notes/03-prm.md
+
+以下文件通过公开接口**调用**上游函数，不含上游代码：
+
+  tests/test_core_gigpo.py        （import gigpo.core_gigpo 并调用）
+  exp/p0/*.py                     （import gigpo.core_gigpo 并调用）
+
+--------------------------------------------------------------------------------
+无隶属关系声明
+--------------------------------------------------------------------------------
+
+本仓库为独立的第三方分析，与 verl、verl-agent、GiGPO 的作者团队，
+以及 ByteDance Ltd.、Nanyang Technological University 均**无任何隶属、
+合作或背书关系**。
+
+"verl"、"verl-agent"、"GiGPO" 等名称归其各自所有者。
