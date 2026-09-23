@@ -20,6 +20,7 @@
 | [E0.4](#e04) | `gamma` 对 step 信号信息量的影响 | 2026-09-20 | ✅ | **立论成立**：gamma=1.0 时位置信息零增量 |
 | [E0.3](#e03) | 单元素组抹平占比 | 2026-09-20 | ✅ | **R2 量级很大**：74% 的步优势被抹平 |
 | [E0.2](#e02) | `adjust_batch` 复制行污染 | 2026-09-20 | ✅ | **R1 影响很小**（<1%），优先级低 |
+| [EP-1](#ep-1) | 远程环境部署（AutoDL） | 2026-09-21 | ✅ | 环境就绪；**踩了 5 个坑，都是同一个根因** |
 
 ---
 
@@ -189,3 +190,137 @@ step 组成员数取决于轨迹重合度，两者不在一个量级。
    实测后 **R1 影响 <1%、R2 影响 74%** —— 精力应放在 R2 与 PRM，不是 R1。
 
 **下一步**：P1（远程跑通 baseline，阻塞：算力）。P0 的四项不依赖算力，已清空。
+
+---
+
+<a id="ep-1"></a>
+## EP-1 — 远程环境部署（AutoDL / RTX 4090D）✅
+
+**日期**：2026-09-21　**性质**：部署记录（非算法实验）
+**结论**：✅ **环境就绪**。`check_env.py --no-gpu` 全绿（3 项警告均为预期或可选）。
+
+### 环境规格（实测）
+
+| 项 | 值 | 备注 |
+|---|---|---|
+| GPU | RTX 4090D, 24GB | 单卡 |
+| **容器内存限额** | **2 GB**（cgroup） | ⚠️ **关键约束，见坑 4** |
+| 宿主机内存 | 503 GB | `free` 显示的是这个，**会误导** |
+| CPU 核数 | 128 | 与内存限额叠加成灾 |
+| CUDA / gcc | 12.8 / 11.4.0 | |
+| 系统盘 | 30 GB（overlay） | 只能放系统 |
+| 数据盘 | 50 GB（`/root/autodl-tmp`） | **模型/环境/数据都放这里** |
+| 安装模式 | **无卡模式** | 成本比 GPU 档低一个数量级，且安装不需要 GPU |
+
+### 安装结果
+
+| 组件 | 版本 | 方式 |
+|---|---|---|
+| torch | 2.8.0+cu128 | vllm 依赖 |
+| vllm | 0.11.0 | aliyun→**清华**源 |
+| **flash-attn** | **2.8.3** | **预编译 wheel**（非编译，见坑 4） |
+| verl | editable | `pip install -e .` |
+| textworld | 1.7.0 | 不带 `[pddl]` extra（见坑 5） |
+| alfworld | 0.4.2 | `--no-deps`（见坑 5） |
+| ALFWorld 数据 | **4027 个 game 文件**, 2.2G | `alfworld-download -f` 成功 |
+
+**磁盘账单**（数据盘 50G）：环境 12G + ALFWorld 数据 2.2G + HF 缓存 115M
++ pip 缓存 5.1G（可清）= **20G / 50G**。
+
+### 五个坑 —— **其中四个是同一个根因**
+
+#### 坑 1：全局开学术加速会拖慢 pip
+
+AutoDL 的 `/etc/network_turbo` 启用后自带的警告原文：
+
+> 开启加速后对访问其他资源如 pip 源等会**更慢**
+
+而安装的绝大部分流量走 PyPI/conda。
+**处置**：不要全局 source，只在需要访问 Google Drive（ALFWorld 数据）时临时启用。
+
+#### 坑 2：conda 默认 channel 在国内超时
+
+默认 channel 里的 `defaults` 指向 `repo.anaconda.com`，实测长时间卡在
+`ReadTimeoutError ... /pkgs/r/linux-64/repodata.json.zst`。
+**处置**：`conda create --override-channels -c <清华源>`。
+
+#### 坑 3：无卡模式下 `nvidia-smi` 返回 0 但输出为空
+
+`nvidia-smi -L` 与 `--query-gpu` 在无卡模式下**退出码为 0、输出为空**。
+只看退出码会误判成"有 GPU"，进而漏设 `TORCH_CUDA_ARCH_LIST`，
+**要等到十几分钟后 flash-attn 编译时才炸**。
+**处置**：判据改为**看输出是否为空**，不看退出码。
+
+#### 坑 4：容器内存被 cgroup 限到 2G，而 `free` 显示 503G —— 编译必然 OOM
+
+这是**最贵的一个坑**，flash-attn 与 ALFWorld 都栽在上面。
+
+现象：
+```
+gcc: fatal error: Killed signal terminated program cc1plus
+setup_remote.sh: line 256:  4712 Killed    pip install alfworld
+```
+
+根因是三个因素叠加：
+1. `free` 读的是**宿主机**内存（503G），真实限额在 `/sys/fs/cgroup/memory.max` = **2G**
+2. CPU 有 **128 核**，构建系统默认按 `nproc` 全开并行
+3. 每个 `cc1plus` 吃 1–2GB → 瞬间爆掉
+
+而且 flash-attn 2.7.4 的构建脚本会为 **5 个架构**（sm80/sm90/compute_100/compute_120）
+编译 **700+ 个 CUDA 文件**，**设了 `TORCH_CUDA_ARCH_LIST=8.9` 也不生效**——
+即便单线程也要数小时。限制 `MAX_JOBS=2` 对 flash-attn 和 fast-downward **都救不回来**。
+
+**处置**：
+- flash-attn → **装预编译 wheel**。关键是要三者对上：
+  `torch 次版本 × python tag × cxx11abi`。注意：
+  - 上游钉的 `2.7.4.post1` **没有 torch2.8 的 wheel**（只到 torch2.7），
+    而 vllm 0.11.0 装的是 torch 2.8 ⇒ 必须用更新的 **2.8.3**（**与上游的版本偏离，须记录**）
+  - `cxx11abi` 要与本机 torch 一致（`torch._C._GLIBCXX_USE_CXX11_ABI`）
+  - ⚠️ **wheel 文件名不能改** —— 里面的 python/abi/platform 标签是 pip 判断兼容性的依据，
+    改名会得到 `not a supported wheel on this platform`
+
+#### 坑 5：`pip install alfworld` 会拉入一个装不上的 C++ 依赖
+
+`alfworld → textworld[pddl] → fast_downward_textworld`（C++ PDDL 规划器，**只有 sdist**）
+⇒ 与坑 4 同样的 OOM。
+
+**但它根本不需要**（静态分析结论）：
+
+| 检查 | 结果 |
+|---|---|
+| vendor 版 alfworld 里 `import fast_downward` | **0 处** |
+| 同上，`import pddl` | **0 处** |
+| `configs/config_tw.yaml` 的 `expert_type` | `handcoded`（非 `planner`） |
+
+**处置**：拆开装 —— `pip install "textworld>=1.6.1"`（不带 extra）
++ `pip install --no-deps alfworld`（只为拿 `alfworld-download` CLI）。
+
+#### 附带：pip 源选错会慢 260 倍
+
+平台默认 `/etc/pip.conf` 指向阿里云，实测：
+
+| 源 | 速度 |
+|---|---|
+| 阿里云（平台默认） | **25 KB/s** ← 438MB 的 vllm wheel 要下 5 小时 |
+| 清华 | **6633 KB/s** |
+| 中科大 / 腾讯云 | 取不到 URL |
+
+换源后同样文件约 70 秒下完。**这个不换，整个安装会被卡死在一个包上。**
+
+### ⚠️ 一处待实测的推断（重要）
+
+跳过 `fast_downward` 是**基于静态分析的推断，不是实测**。上面的证据
+（vendor 代码 0 处 import + 配置用 handcoded）很强，但**只有在 GPU 上真跑起来才能确认**。
+
+⇒ **P1 首次跑 baseline 时，若 ALFWorld 报与 planner / PDDL 相关的错误，就是这里。**
+届时回退方案：在有更大内存的实例上编译 fast_downward，或改用
+`expert_type: handcoded` 之外的路径前先确认。
+
+### 对后续实验的影响
+
+1. **单卡配置**已写入 `deploy/run_single_gpu.sh`（含 `--smoke` 冒烟档）——
+   但**尚未实测**，首次务必冒烟并盯显存。
+2. `size_divisor` 从 64 降到 8（单卡），R1 的影响进一步减小（见 E0.2）。
+3. 环境装在 `/root/autodl-tmp`，**每次登录须 `source deploy/env.sh` 恢复环境变量**，
+   否则 conda 找不到环境、HF 会往系统盘重下。
+

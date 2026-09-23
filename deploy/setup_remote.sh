@@ -245,7 +245,29 @@ if [[ "$WITH_ALFWorld" -eq 1 ]]; then
     #    torch 被降级，请改用独立环境并把此处注释掉。
     pip install "gymnasium==0.29.1"
     pip install "stable-baselines3==2.6.0"
-    pip install alfworld
+
+    # ⚠️ **不要直接 `pip install alfworld`** —— 它会经 `textworld[pddl]` 拉入
+    #    `fast_downward_textworld`（C++ 的 PDDL 规划器，**只有 sdist**），
+    #    必须在本地编译，而在 2G 内存的容器里会被 OOM kill：
+    #        setup_remote.sh: line NNN: Killed    pip install alfworld
+    #    限制并行度（MAX_JOBS=2 等）**实测也救不回来**。
+    #
+    # 但我们并不需要它：
+    #   - 本仓库用的是 **vendor 版 alfworld**
+    #     （`agent_system/environments/env_package/alfworld`），
+    #     该副本里没有任何 `import fast_downward` / `import pddl`
+    #   - fast_downward 只在 `expert_type: "planner"` 时用到，
+    #     而 `configs/config_tw.yaml` 用的是 `handcoded`
+    #
+    # 所以拆开装：textworld 不带 [pddl] extra，alfworld 用 --no-deps
+    # —— 后者只是为了拿到它的 `alfworld-download` CLI 来拉游戏数据。
+    log "安装 textworld（避开 [pddl] extra 里的 fast_downward 编译）"
+    pip install "textworld>=1.6.1"
+
+    log "安装 alfworld（--no-deps，只要 alfworld-download CLI）"
+    pip install --no-deps alfworld
+    command -v alfworld-download >/dev/null \
+        || warn "未找到 alfworld-download，游戏数据可能需要手动下载。"
 
     log "下载 ALFWorld 资源到 $ALFWORLD_DATA"
     # alfworld 从环境变量 ALFWORLD_DATA 取路径（alfworld/info.py），上面已导出到 WORK_DIR。

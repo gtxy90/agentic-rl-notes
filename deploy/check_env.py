@@ -59,7 +59,7 @@ def check_python(rep: Report) -> None:
         rep.add(FAIL, "Python 版本", f"{v.major}.{v.minor} —— 需要 >=3.10")
 
 
-def check_torch(rep: Report) -> None:
+def check_torch(rep: Report, expect_no_gpu: bool = False) -> None:
     try:
         import torch
     except ImportError:
@@ -67,8 +67,15 @@ def check_torch(rep: Report) -> None:
         return
 
     rep.add(OK, "torch", torch.__version__)
+
     if not torch.cuda.is_available():
-        rep.add(FAIL, "CUDA", "不可用 —— 训练无法在本机进行")
+        if expect_no_gpu:
+            # 无卡模式（如 AutoDL 的无卡开机）下这是**预期状态** —— 装环境不需要 GPU，
+            # 只有训练才需要。降级为 ⚠️，避免把整体结论判成"未就绪"。
+            rep.add(WARN, "CUDA",
+                    "不可用（--no-gpu 模式，预期如此）—— 环境可用于安装/自检，训练需 GPU")
+        else:
+            rep.add(FAIL, "CUDA", "不可用 —— 训练无法在本机进行")
         return
 
     n = torch.cuda.device_count()
@@ -144,24 +151,66 @@ def check_repo(rep: Report, repo: Path) -> None:
         rep.add(WARN, "verl.utils.torch_functional", f"{type(e).__name__}: {e}")
 
 
+def _data_dir_candidates() -> list[Path]:
+    """训练数据的候选位置。
+
+    ⚠️ 不能只看 `~/data/verl-agent` —— `setup_remote.sh` 会把 `--local_dir`
+    指到 `WORK_DIR`（AutoDL 上系统盘只有 30G，数据必须放数据盘）。
+    不读环境变量会**报假阴性**，而假阴性比不检查更糟。
+    """
+    cands = []
+    if os.environ.get("VERL_AGENT_DATA"):
+        cands.append(Path(os.environ["VERL_AGENT_DATA"]))
+    if os.environ.get("WORK_DIR"):
+        cands.append(Path(os.environ["WORK_DIR"]) / "data" / "verl-agent")
+    cands.append(Path.home() / "data" / "verl-agent")
+    return cands
+
+
+def _alfworld_dir_candidates() -> list[Path]:
+    """ALFWorld 资源的候选位置（alfworld 从 ALFWORLD_DATA 取路径）。"""
+    cands = []
+    if os.environ.get("ALFWORLD_DATA"):
+        cands.append(Path(os.environ["ALFWORLD_DATA"]))
+    if os.environ.get("WORK_DIR"):
+        cands.append(Path(os.environ["WORK_DIR"]) / "alfworld")
+    cands.append(Path.home() / ".cache" / "alfworld")
+    return cands
+
+
 def check_data(rep: Report) -> None:
-    home = Path.home()
-
-    # 训练数据：examples/data_preprocess/prepare.py 的默认输出位置
-    data_dir = home / "data" / "verl-agent"
+    # ---- 训练数据 ----
     for sub in ("text", "visual"):
-        files = sorted((data_dir / sub).glob("*.parquet")) if (data_dir / sub).is_dir() else []
-        if files:
-            rep.add(OK, f"数据集 {sub}", ", ".join(f.name for f in files))
+        found: tuple[Path, list[Path]] | None = None
+        for d in _data_dir_candidates():
+            files = sorted((d / sub).glob("*.parquet")) if (d / sub).is_dir() else []
+            if files:
+                found = (d, files)
+                break
+        if found:
+            d, files = found
+            rep.add(OK, f"数据集 {sub}", f"{', '.join(f.name for f in files)}  ({d})")
         else:
-            rep.add(WARN, f"数据集 {sub}", f"缺失 —— 需跑 examples/data_preprocess/prepare.py")
+            tried = " | ".join(str(d / sub) for d in _data_dir_candidates())
+            rep.add(WARN, f"数据集 {sub}", f"缺失 —— 需跑 prepare.py；已找过：{tried}")
 
-    # ALFWorld 资源：alfworld-download 默认落在 ~/.cache/alfworld
-    alf = home / ".cache" / "alfworld"
-    if alf.is_dir() and any(alf.iterdir()):
-        rep.add(OK, "ALFWorld 资源", str(alf))
+    # ---- ALFWorld 资源 ----
+    alf: Path | None = None
+    for d in _alfworld_dir_candidates():
+        if d.is_dir() and any(d.iterdir()):
+            alf = d
+            break
+    if alf:
+        # 有 json_2.1.1 才算完整，否则只是空目录
+        if (alf / "json_2.1.1").is_dir():
+            n = sum(1 for _ in (alf / "json_2.1.1").rglob("game.tw-pddl"))
+            rep.add(OK, "ALFWorld 资源", f"{alf}  （{n} 个 game 文件）")
+        else:
+            rep.add(WARN, "ALFWorld 资源", f"{alf} 存在但没有 json_2.1.1/，下载可能不完整")
     else:
-        rep.add(WARN, "ALFWorld 资源", "缺失 —— 需跑 `alfworld-download -f`")
+        rep.add(WARN, "ALFWorld 资源",
+                f"缺失 —— 需跑 `alfworld-download -f`；已找过："
+                f"{' | '.join(str(d) for d in _alfworld_dir_candidates())}")
         rep.add(WARN, "  ALFWorld 包", "已安装" if _version("alfworld") else "未安装")
 
 
@@ -187,16 +236,24 @@ def main() -> int:
         action="store_true",
         help="本地模式：预期报出无 CUDA。用于验证本脚本在无 GPU 机器上不会误报通过。",
     )
+    ap.add_argument(
+        "--no-gpu",
+        action="store_true",
+        help="无卡模式：CUDA 不可用属预期，降级为警告而不是失败。"
+             "用于在无 GPU 的实例上验证安装（装环境不需要 GPU）。",
+    )
     args = ap.parse_args()
+    expect_no_gpu = args.local or args.no_gpu
 
     rep = Report()
     print("=" * 72)
-    print(f"verl-agent 环境自检{'（本地模式）' if args.local else ''}")
+    tag = "（本地模式）" if args.local else ("（无卡模式）" if args.no_gpu else "")
+    print(f"verl-agent 环境自检{tag}")
     print("=" * 72)
 
     check_python(rep)
     check_system(rep)
-    check_torch(rep)
+    check_torch(rep, expect_no_gpu=expect_no_gpu)
     check_packages(rep)
     check_imports(rep)
     check_repo(rep, Path(args.repo).resolve())
@@ -204,7 +261,7 @@ def main() -> int:
     rep.render()
 
     if args.local:
-        print("本地模式：本机无 CUDA 时出现 ❌ 属**预期结果**，说明自检脚本判断正确。")
+        print("本地模式：本机无 CUDA 属**预期结果**，说明自检脚本判断正确。")
         print("（本机只做算法单测，正式训练在远程 CUDA 执行。）")
         return 0
 
